@@ -11,6 +11,18 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 CIPHER_PATTERN = b'createDecipheriv("aes-128-cbc"'
 KEY_MARKER = b'Buffer.from("'
 
+# --- known U3ENC keys / layouts ---------------------------------------------
+# Legacy layout (client < 6.13.0): IV(16) + AES-128-CBC ciphertext.
+OLD_KEY_B64 = 'QJBNiBmV55PDrewyne3GsA=='
+# Current layout (client >= 6.13.0), see client main process `Zg()`:
+#   magic(12) + random(32) + IV(16) + AES-128-CBC ciphertext
+U3ENC_MAGIC = bytes.fromhex('125b8131626869121ebf8d1b')
+U3ENC_HEADER_LEN = 12 + 32 + 16
+NEW_KEY_B64 = 'dv8UqXZbadxSEllGtpOlKQ=='
+
+OLD_KEY = base64.b64decode(OLD_KEY_B64)
+NEW_KEY = base64.b64decode(NEW_KEY_B64)
+
 
 def extract_key(exe_path):
     data = exe_path.read_bytes()
@@ -36,12 +48,31 @@ def extract_key(exe_path):
     return key_b64, key, pos
 
 
-def decrypt_u3enc(data, key):
-    if len(data) < 32:
-        raise ValueError('file too short: need at least 16-byte IV + one AES block')
+def is_new_u3enc(data):
+    return data[:len(U3ENC_MAGIC)] == U3ENC_MAGIC
 
-    iv = data[:16]
-    ciphertext = data[16:]
+
+def decrypt_u3enc(data, key=None):
+    """Decrypt a ``.u3enc`` payload, auto-detecting the layout.
+
+    ``key`` only applies to the legacy layout; current-format files always use
+    the built-in current key (extracted from the client main process).
+    """
+    if is_new_u3enc(data):
+        if len(data) < U3ENC_HEADER_LEN + 16:
+            raise ValueError('file too short for current U3ENC layout')
+        # skip magic(12) + random(32)
+        iv = data[44:60]
+        ciphertext = data[U3ENC_HEADER_LEN:]
+        key = NEW_KEY
+    else:
+        if len(data) < 32:
+            raise ValueError('file too short: need at least 16-byte IV + one AES block')
+        if key is None:
+            key = OLD_KEY
+        iv = data[:16]
+        ciphertext = data[16:]
+
     if len(ciphertext) % 16 != 0:
         raise ValueError('ciphertext length is not a multiple of 16')
 
@@ -50,6 +81,25 @@ def decrypt_u3enc(data, key):
 
     unpadder = padding.PKCS7(128).unpadder()
     return unpadder.update(padded) + unpadder.finalize()
+
+
+def load_or_default_key(exe=None, key_hex=None):
+    """Legacy key resolution used by callers that still pass a key around.
+
+    Order: explicit ``--key-hex`` -> ``extract_key(exe)`` -> built-in legacy
+    key.  Current-format files ignore this value inside :func:`decrypt_u3enc`.
+    """
+    if key_hex:
+        key = bytes.fromhex(key_hex)
+        if len(key) != 16:
+            raise ValueError('--key-hex must be 32 hex chars (16 bytes)')
+        return key
+    if exe is not None and Path(exe).is_file():
+        try:
+            return extract_key(Path(exe))[1]
+        except ValueError:
+            pass
+    return OLD_KEY
 
 
 def parse_args(argv=None):
@@ -61,11 +111,11 @@ def parse_args(argv=None):
     ex = sub.add_parser('extract-key', help='extract the hardcoded AES key from an exe')
     ex.add_argument('exe', type=Path, help='path to up366.exe')
 
-    de = sub.add_parser('decrypt', help='extract key from an exe and decrypt a .u3enc file')
-    de.add_argument('--exe', type=Path, help='path to up366.exe (unless --key-hex is used)')
+    de = sub.add_parser('decrypt', help='decrypt a .u3enc file (auto-detects new/old layout)')
+    de.add_argument('--exe', type=Path, help='path to up366.exe (legacy key extraction only)')
     de.add_argument('input', type=Path, help='path to the .u3enc file')
     de.add_argument('output', type=Path, nargs='?', help='output path (default: input without .u3enc)')
-    de.add_argument('--key-hex', help='use this 32-char hex AES-128 key instead of extracting from exe')
+    de.add_argument('--key-hex', help='legacy 32-char hex AES-128 key (ignored by current-format files)')
 
     return parser.parse_args(argv)
 
@@ -81,18 +131,29 @@ def main(argv=None):
         return
 
     if args.command == 'decrypt':
-        if args.key_hex:
+        data = args.input.read_bytes()
+
+        if is_new_u3enc(data):
+            key = NEW_KEY
+            key_b64 = NEW_KEY_B64
+            offset = None
+            scheme = 'current (magic + random + IV + aes-128-cbc)'
+        elif args.key_hex:
             key = bytes.fromhex(args.key_hex)
             if len(key) != 16:
                 raise ValueError('--key-hex must be 32 hex chars (16 bytes)')
             key_b64 = base64.b64encode(key).decode()
             offset = None
-        else:
-            if args.exe is None:
-                raise ValueError('decrypt requires --exe or --key-hex')
+            scheme = 'legacy (explicit key)'
+        elif args.exe is not None:
             key_b64, key, offset = extract_key(args.exe)
+            scheme = 'legacy (key extracted from exe)'
+        else:
+            key = OLD_KEY
+            key_b64 = OLD_KEY_B64
+            offset = None
+            scheme = 'legacy (built-in key)'
 
-        data = args.input.read_bytes()
         plain = decrypt_u3enc(data, key)
 
         output = args.output
@@ -103,11 +164,12 @@ def main(argv=None):
             )
         output.write_bytes(plain)
 
+        print(f'scheme:     {scheme}')
         print(f'key base64: {key_b64}')
         print(f'key hex:    {key.hex()}')
         if offset is not None:
             print(f'cipher ref: file offset {offset}')
-        print(f'iv:         {data[:16].hex()}')
+        print(f'iv:         {(data[44:60] if is_new_u3enc(data) else data[:16]).hex()}')
         print(f'plaintext:  {len(plain)} bytes -> {output}')
         return
 

@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from option_order_lib import latest_orders_for_homework  # noqa: E402
-from u3enc_tool import decrypt_u3enc, extract_key  # noqa: E402
+from u3enc_tool import decrypt_u3enc, load_or_default_key  # noqa: E402
 
 UUID_RE = re.compile(r'^[0-9A-Fa-f]{32}$')
 PAGE_RE = re.compile(r'^page(\d+)\.js\.u3enc$', re.IGNORECASE)
@@ -316,6 +316,42 @@ def make_item(slide, section_title):
     return item
 
 
+def _leaf_questions(node):
+    """Yield the actual question dicts from a slide/question node.
+
+    Group questions (e.g. qtype 109/583) wrap their sub-questions in
+    ``questions_list``; a plain question is yielded as-is.
+    """
+    sub_list = node.get('questions_list') or []
+    if sub_list:
+        for sub in sub_list:
+            yield sub
+    else:
+        yield node
+
+
+def iter_page_questions(cfg):
+    """Yield ``(section_title, question)`` for every question in a page config.
+
+    Supports both the legacy ``sections[].slides[]`` layout and the current
+    (client >= 6.13.0) ``slides[].questionList[]`` layout.
+    """
+    sections = cfg.get('sections')
+    if sections:
+        for section in sections:
+            title = clean_html(section.get('sectionTitle', ''))
+            for slide in section.get('slides', []):
+                for question in _leaf_questions(slide):
+                    yield title, question
+        return
+
+    for slide in cfg.get('slides', []):
+        title = clean_html(slide.get('title') or slide.get('subTitle') or '')
+        for question in slide.get('questionList') or []:
+            for leaf in _leaf_questions(question):
+                yield title, leaf
+
+
 def collect_items(homework_dir, key):
     pages = page_files(homework_dir)
     items = []
@@ -323,15 +359,8 @@ def collect_items(homework_dir, key):
     if pages is not None:
         for page in pages:
             cfg = load_page_config(page, key)
-            for section in cfg.get('sections', []):
-                section_title = clean_html(section.get('sectionTitle', ''))
-                for slide in section.get('slides', []):
-                    sub_list = slide.get('questions_list') or []
-                    if sub_list:
-                        for sub in sub_list:
-                            items.append(make_item(sub, section_title))
-                    else:
-                        items.append(make_item(slide, section_title))
+            for section_title, question in iter_page_questions(cfg):
+                items.append(make_item(question, section_title))
     else:
         for qd in question_data_files(homework_dir):
             cfg = load_page_config(qd, key)
@@ -419,6 +448,8 @@ def parse_args(argv=None):
                         help='up366 data root (default: D:\\Up366StudentFiles)')
     parser.add_argument('--exe', default=None,
                         help='path to up366.exe used to extract the AES key')
+    parser.add_argument('--key-hex', default=None,
+                        help='legacy 32-char hex AES key (current .u3enc files are auto-detected)')
     parser.add_argument('--output', default=None,
                         help='output txt path (default: workspace 最新作业答案.txt)')
     parser.add_argument('--homework-uuid', default=None,
@@ -436,7 +467,7 @@ def main(argv=None):
     exe = Path(args.exe) if args.exe else Path(__file__).resolve().with_name('up366.exe')
     output = Path(args.output) if args.output else Path(__file__).resolve().parent / '最新作业答案.txt'
 
-    _, key, _ = extract_key(exe)
+    key = load_or_default_key(exe, args.key_hex)
     if args.homework_uuid:
         homework_dir = find_homework_by_uuid(data_dir, args.homework_uuid)
     else:

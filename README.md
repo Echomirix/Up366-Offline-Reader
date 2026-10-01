@@ -11,31 +11,23 @@ python -m venv .venv
 
 ## U3ENC 解密
 
-从 exe 提取 AES 密钥：
+直接解密（自动识别新旧格式，不需要 exe）：
+
+```text
+.\.venv\Scripts\python.exe u3enc_tool.py decrypt questionData.js.u3enc questionData.js
+```
+
+仅当处理旧版 exe 时才需要从 exe 提取密钥（新版客户端 exe 里已无明文 key，会自动回退到内置 key）：
 
 ```text
 .\.venv\Scripts\python.exe u3enc_tool.py extract-key up366.exe
-```
-
-解密单个 `.u3enc` 文件：
-
-```text
 .\.venv\Scripts\python.exe u3enc_tool.py decrypt --exe up366.exe questionData.js.u3enc questionData.js
 ```
 
-已知密钥时可直接解密：
+算法说明（AES-128-CBC + PKCS#7，两种布局并存）：
 
-```text
-.\.venv\Scripts\python.exe u3enc_tool.py decrypt --key-hex {key-hex} questionData.js.u3enc questionData.js
-```
-
-算法说明：
-
-- 算法：AES-128-CBC
-- 密钥：从 `up366.exe` 内嵌引导代码中动态提取
-- IV：文件前 16 字节
-- 密文：文件第 17 字节起至结尾
-- 填充：PKCS#7
+- 当前格式（客户端 6.13.0+）：`magic(12)=125b8131626869121ebf8d1b` + 随机 32 字节 + `IV(16)` + 密文，key = `dv8UqXZbadxSEllGtpOlKQ==`，文件长度 `% 16 == 12`。
+- 旧格式：`IV(16)` + 密文，key = `QJBNiBmV55PDrewyne3GsA==`，文件长度为 16 的倍数。
 
 ## 提取作业答案
 

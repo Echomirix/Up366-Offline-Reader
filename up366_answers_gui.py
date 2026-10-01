@@ -13,7 +13,7 @@ WORKSPACE = Path(__file__).resolve().parent
 sys.path.insert(0, str(WORKSPACE))
 
 from extract_answers import build_answer_text, homework_dirs  # noqa: E402
-from u3enc_tool import extract_key  # noqa: E402
+from u3enc_tool import OLD_KEY, extract_key  # noqa: E402
 
 DEFAULT_DATA_DIR = Path(r'D:\Up366StudentFiles')
 DEFAULT_EXE = WORKSPACE / 'up366.exe'
@@ -84,8 +84,11 @@ class AnswersGUI:
     def _initial_setup(self):
         self._update_path_entries()
         if not self._valid_key(self.config.get('key_hex')):
-            self.status_var.set('首次使用，请定位 up366.exe')
-            self.ensure_key()
+            # Ship with the built-in legacy key; current .u3enc files carry
+            # their own key and are auto-detected during decryption.
+            self.config['key_hex'] = OLD_KEY.hex()
+            self.save_config()
+            self.status_var.set('已使用内置密钥（新版 .u3enc 自动识别）')
         else:
             self.status_var.set('已从配置加载密钥')
         self.load_homeworks()
